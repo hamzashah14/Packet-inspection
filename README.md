@@ -411,7 +411,7 @@ The multi-threaded version (`dpi_mt.cpp`) adds **parallelism** for high performa
     └────────┬────────┘           └────────┬────────┘
              │                             │
       ┌──────┴──────┐               ┌──────┴──────┐
-      │hash % 2     │               │hash % 2     │
+      │(hash/2) % 2 │               │(hash/2) % 2 │
       ▼             ▼               ▼             ▼
 ┌──────────┐ ┌──────────┐   ┌──────────┐ ┌──────────┐
 │FP0 Thread│ │FP1 Thread│   │FP2 Thread│ │FP3 Thread│
@@ -451,6 +451,8 @@ All packets of this connection go to FP2.
 FP2 can track the flow state correctly.
 ```
 
+**One hash, two stages:** the reader and the LBs use the same 5-tuple hash. The reader takes `hash % num_lbs` to pick the LB, and the LB takes the next part, `(hash / num_lbs) % fps_per_lb`, to pick the FP. Using `hash % N` at both stages would leave FPs idle (with the default 2 LBs x 2 FPs, only FP0 and FP3 would ever see traffic). `tests/check_fp_distribution.sh` builds the engine, runs the sample capture and fails if any FP processes 0 packets.
+
 ### Detailed Flow
 
 #### Step 1: Reader Thread
@@ -476,8 +478,8 @@ void LoadBalancer::run() {
         // Pop from my input queue
         auto pkt = input_queue_.pop();
         
-        // Hash to select Fast Path
-        size_t fp_idx = hash(pkt.tuple) % num_fps_;
+        // Hash to select Fast Path: the next "digit" of the hash the reader used for the LB
+        size_t fp_idx = (hash(pkt.tuple) / num_lbs_) % num_fps_;
         
         // Push to FP's queue
         fps_[fp_idx]->queue().push(pkt);

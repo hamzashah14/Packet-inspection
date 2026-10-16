@@ -305,8 +305,8 @@ private:
 // =============================================================================
 class LoadBalancer {
 public:
-    LoadBalancer(int id, std::vector<FastPath*> fps)
-        : id_(id), fps_(std::move(fps)), num_fps_(fps_.size()) {}
+    LoadBalancer(int id, std::vector<FastPath*> fps, size_t num_lbs)
+        : id_(id), fps_(std::move(fps)), num_fps_(fps_.size()), num_lbs_(num_lbs) {}
     
     void start() {
         running_ = true;
@@ -327,6 +327,7 @@ private:
     int id_;
     std::vector<FastPath*> fps_;
     size_t num_fps_;
+    size_t num_lbs_;
     TSQueue<Packet> input_queue_;
     
     std::atomic<bool> running_{false};
@@ -338,9 +339,11 @@ private:
             auto pkt_opt = input_queue_.pop(100);
             if (!pkt_opt) continue;
             
-            // Hash to select FP
+            // Hash to select FP. The reader already used (hash % num_lbs_) to pick this LB,
+            // so use the next "digit" of the same hash. Reusing hash % N here would only ever
+            // reach the FPs whose index matches this LB's hash residue.
             FiveTupleHash hasher;
-            size_t fp_idx = hasher(pkt_opt->tuple) % num_fps_;
+            size_t fp_idx = (hasher(pkt_opt->tuple) / num_lbs_) % num_fps_;
             
             fps_[fp_idx]->queue().push(std::move(*pkt_opt));
             dispatched_++;
@@ -382,7 +385,7 @@ public:
             for (int i = 0; i < cfg.fps_per_lb; i++) {
                 lb_fps.push_back(fps_[start + i].get());
             }
-            lbs_.push_back(std::make_unique<LoadBalancer>(lb, std::move(lb_fps)));
+            lbs_.push_back(std::make_unique<LoadBalancer>(lb, std::move(lb_fps), cfg.num_lbs));
         }
     }
     
