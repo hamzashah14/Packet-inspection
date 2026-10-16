@@ -18,6 +18,8 @@ This document explains **everything** about this project - from basic networking
 9. [How Blocking Works](#9-how-blocking-works)
 10. [Building and Running](#10-building-and-running)
 11. [Understanding the Output](#11-understanding-the-output)
+12. [Signatures, Content Filtering, P2P and Live Capture](#12-signatures-content-filtering-p2p-and-live-capture)
+13. [Extending the Project](#13-extending-the-project)
 
 ---
 
@@ -33,12 +35,14 @@ This document explains **everything** about this project - from basic networking
 
 ### What Our DPI Engine Does:
 ```
-User Traffic (PCAP) → [DPI Engine] → Filtered Traffic (PCAP)
-                           ↓
-                    - Identifies apps (YouTube, Facebook, etc.)
-                    - Blocks based on rules
+PCAP file or live traffic → [DPI Engine] → Filtered Traffic (PCAP)
+ (libpcap)                       ↓
+                    - Identifies apps (YouTube, Facebook, BitTorrent, ...)
+                    - Blocks by IP, app, domain, content category or malware signature
+                    - Throttles peer-to-peer traffic
                     - Generates reports
 ```
+See [section 12](#12-signatures-content-filtering-p2p-and-live-capture) for signatures, categories, P2P throttling and live capture.
 
 ---
 
@@ -157,7 +161,13 @@ packet_analyzer/
 │   ├── load_balancer.h        # LB thread (multi-threaded version)
 │   ├── fast_path.h            # FP thread (multi-threaded version)
 │   ├── thread_safe_queue.h    # Thread-safe queue
-│   └── dpi_engine.h           # Main orchestrator
+│   ├── dpi_engine.h           # Main orchestrator
+│   ├── packet_source.h        # Packets from a file or from libpcap (live capture)
+│   ├── signature_engine.h     # Malware signatures (Aho-Corasick, domain, IP, JA3)
+│   ├── ja3.h                  # JA3 TLS fingerprint + MD5
+│   ├── content_filter.h       # Content categories (ads, social, ...)
+│   ├── p2p_detector.h         # BitTorrent detection from payload bytes
+│   └── token_bucket.h         # Per-flow rate limiting
 │
 ├── src/                        # Implementation files
 │   ├── pcap_reader.cpp        # PCAP file handling
@@ -166,8 +176,15 @@ packet_analyzer/
 │   ├── types.cpp              # Helper functions
 │   ├── main_working.cpp       # ★ SIMPLE VERSION ★
 │   ├── dpi_mt.cpp             # ★ MULTI-THREADED VERSION ★
+│   ├── packet_source.cpp      # File source and libpcap live capture
+│   ├── signature_engine.cpp   # Signature rules file + matching
+│   ├── ja3.cpp                # JA3 fingerprint + MD5
+│   ├── content_filter.cpp     # Category domain lists
 │   └── [other files]          # Supporting code
 │
+├── rules/                      # Example --signatures and --categories files
+├── tests/                      # Unit tests, feature tests, test capture generator
+├── Makefile                    # make / make dpi_engine_live / make test
 ├── generate_test_pcap.py      # Creates test data
 ├── test_dpi.pcap              # Sample capture with various traffic
 └── README.md                  # This file!
@@ -868,26 +885,22 @@ Connection to YouTube:
 
 ### Prerequisites
 
-- **macOS/Linux** with C++17 compiler
-- **g++** or **clang++**
-- No external libraries needed!
+- **macOS/Linux** with a C++17 compiler (**g++** or **clang++**) and `make`
+- Nothing else is needed to read capture files
+- **Live capture only:** libpcap headers (`libpcap-dev` on Debian/Ubuntu, included with the Xcode command line tools on macOS)
 
 ### Build Commands
 
-**Simple Version:**
+```bash
+make                  # build/dpi_engine         reads PCAP files, no external libraries
+make dpi_engine_live  # build/dpi_engine_live    the same, plus live capture through libpcap
+make test             # unit tests + the end-to-end tests described in section 12
+```
+
+**Simple Version** (single-threaded, for learning):
 ```bash
 g++ -std=c++17 -O2 -I include -o dpi_simple \
     src/main_working.cpp \
-    src/pcap_reader.cpp \
-    src/packet_parser.cpp \
-    src/sni_extractor.cpp \
-    src/types.cpp
-```
-
-**Multi-threaded Version:**
-```bash
-g++ -std=c++17 -pthread -O2 -I include -o dpi_engine \
-    src/dpi_mt.cpp \
     src/pcap_reader.cpp \
     src/packet_parser.cpp \
     src/sni_extractor.cpp \
@@ -898,12 +911,12 @@ g++ -std=c++17 -pthread -O2 -I include -o dpi_engine \
 
 **Basic usage:**
 ```bash
-./dpi_engine test_dpi.pcap output.pcap
+./build/dpi_engine test_dpi.pcap output.pcap
 ```
 
 **With blocking:**
 ```bash
-./dpi_engine test_dpi.pcap output.pcap \
+./build/dpi_engine test_dpi.pcap output.pcap \
     --block-app YouTube \
     --block-app TikTok \
     --block-ip 192.168.1.50 \
@@ -912,15 +925,20 @@ g++ -std=c++17 -pthread -O2 -I include -o dpi_engine \
 
 **Configure threads (multi-threaded only):**
 ```bash
-./dpi_engine input.pcap output.pcap --lbs 4 --fps 4
+./build/dpi_engine input.pcap output.pcap --lbs 4 --fps 4
 # Creates 4 LB threads × 4 FP threads = 16 processing threads
 ```
+
+Run `./build/dpi_engine` with no arguments for the full option list. Unknown options and bad values are rejected with a message instead of being ignored.
 
 ### Creating Test Data
 
 ```bash
 python3 generate_test_pcap.py
 # Creates test_dpi.pcap with sample traffic
+
+python3 tests/make_feature_pcap.py
+# Creates tests/features.pcap (BitTorrent, EICAR, TLS fingerprints, categories, ...) with the expected counts
 ```
 
 ---
@@ -931,51 +949,59 @@ python3 generate_test_pcap.py
 
 ```
 ╔══════════════════════════════════════════════════════════════╗
-║              DPI ENGINE v2.0 (Multi-threaded)                 ║
+║              DPI ENGINE v2.1 (Multi-threaded)                 ║
 ╠══════════════════════════════════════════════════════════════╣
-║ Load Balancers:  2    FPs per LB:  2    Total FPs:  4        ║
+║ Load Balancers:  2    FPs per LB:  2    Total FPs:  4     ║
 ╚══════════════════════════════════════════════════════════════╝
 
-[Rules] Blocked app: YouTube
 [Rules] Blocked IP: 192.168.1.50
-
-[Reader] Processing packets...
+[Rules] Blocked app: YouTube
+Opened PCAP file: test_dpi.pcap
+  Version: 2.4
+  Snaplen: 65535 bytes
+  Link type: 1 (Ethernet)
+[Reader] Processing packets (file)...
 [Reader] Done reading 77 packets
 
 ╔══════════════════════════════════════════════════════════════╗
 ║                      PROCESSING REPORT                        ║
 ╠══════════════════════════════════════════════════════════════╣
-║ Total Packets:                77                              ║
-║ Total Bytes:                5738                              ║
-║ TCP Packets:                  73                              ║
-║ UDP Packets:                   4                              ║
+║ Total Packets:                77                           ║
+║ Total Bytes:                5738                           ║
+║ TCP Packets:                  73                           ║
+║ UDP Packets:                   4                           ║
 ╠══════════════════════════════════════════════════════════════╣
-║ Forwarded:                    69                              ║
-║ Dropped:                       8                              ║
+║ Forwarded:                    71                           ║
+║ Dropped:                       6                           ║
+║   by rule:                     6                           ║
+║   by signature:                0                           ║
+║   by category:                 0                           ║
+║   by throttle:                 0                           ║
 ╠══════════════════════════════════════════════════════════════╣
 ║ THREAD STATISTICS                                             ║
-║   LB0 dispatched:             53                              ║
-║   LB1 dispatched:             24                              ║
-║   FP0 processed:              53                              ║
-║   FP1 processed:               0                              ║
-║   FP2 processed:               0                              ║
-║   FP3 processed:              24                              ║
+║   LB0 dispatched:             53                           ║
+║   LB1 dispatched:             24                           ║
+║   FP0 processed:              37                           ║
+║   FP1 processed:              16                           ║
+║   FP2 processed:              10                           ║
+║   FP3 processed:              14                           ║
 ╠══════════════════════════════════════════════════════════════╣
 ║                   APPLICATION BREAKDOWN                       ║
 ╠══════════════════════════════════════════════════════════════╣
-║ HTTPS                39  50.6% ##########                     ║
-║ Unknown              16  20.8% ####                           ║
-║ YouTube               4   5.2% # (BLOCKED)                    ║
-║ DNS                   4   5.2% #                              ║
-║ Facebook              3   3.9%                                ║
-║ ...                                                           ║
+║ HTTPS                39  50.6% ##########            ║
+║ Unknown              16  20.8% ####                  ║
+║ DNS                   4   5.2% #                     ║
+║ Twitter/X             3   3.9%                       ║
+║ HTTP                  2   2.6%                       ║
+║ Apple                 1   1.3%                       ║
+║ ...                                                          ║
 ╚══════════════════════════════════════════════════════════════╝
 
 [Detected Domains/SNIs]
-  - www.youtube.com -> YouTube
-  - www.facebook.com -> Facebook
-  - www.google.com -> Google
-  - github.com -> GitHub
+  - httpbin.org -> HTTPS
+  - www.apple.com -> Apple
+  - www.cloudflare.com -> Cloudflare
+  - open.spotify.com -> Spotify
   ...
 ```
 
@@ -987,14 +1013,108 @@ python3 generate_test_pcap.py
 | Rules | Which blocking rules are active |
 | Total Packets | Packets read from input file |
 | Forwarded | Packets written to output file |
-| Dropped | Packets blocked (not written) |
+| Dropped | Packets not written, with the reason: `by rule`, `by signature`, `by category` or `by throttle` |
 | Thread Statistics | Work distribution across threads |
 | Application Breakdown | Traffic classification results |
 | Detected SNIs | Actual domain names found |
+| Detections | Malware signatures and blocked categories that matched (one line per signature, counted in flows) |
+| Content Categories Seen | Packets per category, when a domain belongs to one |
+| TLS Fingerprints | JA3 hash per server name, with `--show-ja3` |
 
 ---
 
-## 12. Extending the Project
+## 12. Signatures, Content Filtering, P2P and Live Capture
+
+### How a packet is checked
+
+Every packet goes through the same steps inside its fast path. The first step that blocks a flow decides it, and from then on every packet of that flow is dropped (flow-based blocking, see section 9).
+
+```
+classify (app, server name, BitTorrent)
+   → malware signatures      --signatures
+   → block rules             --block-ip / --block-app / --block-domain
+   → content categories      --block-category
+   → rate limit              --throttle-app / --throttle-p2p     (slows a flow down, never blocks it)
+   → forward or drop
+```
+
+### Malware signatures (`--signatures <file>`)
+
+A rules file holds one signature per line. See [`rules/signatures.txt`](rules/signatures.txt) for a commented example.
+
+| Type | Matches | Example |
+|------|---------|---------|
+| `payload` | bytes inside a packet's payload | `payload EICAR string:X5O!P%@AP...` or `payload PE hex:4d5a9000` |
+| `domain` | the TLS server name or HTTP Host, or any sub-domain of it | `domain C2 c2.evil-example.test` |
+| `ip` | either end of the connection, single address or CIDR range | `ip Range 203.0.113.0/24` |
+| `ja3` | the TLS client fingerprint | `ja3 Tool dafa4e7f5b2f458ed067280818cfcdcf` |
+
+- **Payload patterns** are matched with an [Aho-Corasick](https://en.wikipedia.org/wiki/Aho%E2%80%93Corasick_algorithm) automaton, so the cost per packet does not grow with the number of signatures.
+- **JA3** is an MD5 of the TLS ClientHello's version, cipher suites, extensions, elliptic curves and point formats (GREASE values left out). The same client software always gives the same hash, so known malware tools can be spotted even though the traffic is encrypted. Use `--show-ja3` to list the fingerprints in a capture, then copy one into a `ja3` signature.
+- A malformed file is rejected with `file:line` and the reason; nothing is silently skipped.
+- The report lists each signature that fired under `[Detections]`, counted in flows.
+
+### Content filtering (`--block-category`, `--categories`)
+
+Domains are grouped into categories. `--block-category ads` blocks every flow whose server name belongs to the `ads` category.
+
+- Built-in categories: `ads`, `social`, `streaming`, `gaming`, `torrents`.
+- `--categories <file>` adds your own, one `category: domain, domain` per line ([`rules/categories.txt`](rules/categories.txt)). Existing names are extended.
+- A domain matches itself and its sub-domains (`doubleclick.net` matches `ads.doubleclick.net`, not `notdoubleclick.net`).
+- Packets per category are listed under `[Content Categories Seen]` even when nothing is blocked.
+
+### Peer-to-peer detection and throttling
+
+Peer-to-peer traffic has no server name, so it is recognised from the payload, on any port:
+
+- BitTorrent peer handshake (TCP)
+- BitTorrent tracker announce over HTTP
+- Mainline DHT messages (UDP)
+
+Matching flows are classified as `BitTorrent`, so `--block-app BitTorrent` works like any other app. To slow them down instead:
+
+```bash
+./build/dpi_engine in.pcap out.pcap --throttle-p2p 64KB/s
+./build/dpi_engine in.pcap out.pcap --throttle-app YouTube 2MB/s      # any app can be throttled
+```
+
+Rates are `B/s`, `KB/s` or `MB/s` (a bare number means KB/s). Each flow gets its own token bucket, allowing a burst of one second of traffic (at least one full packet), and packets over budget are dropped so the sender backs off. Time comes from the packet timestamps, so replaying a capture throttles it exactly as it would have been at the time. Throttled packets are counted under `Dropped` as `by throttle`. Encrypted BitTorrent (MSE/PE) and uTP are not recognised.
+
+### Live capture (libpcap)
+
+```bash
+make dpi_engine_live
+./build/dpi_engine_live --list-ifaces
+sudo ./build/dpi_engine_live --iface en0 live.pcap --duration 60 --bpf "tcp port 443" \
+    --signatures rules/signatures.txt --block-category ads
+```
+
+- `--iface` replaces the input file; `--bpf` limits what is captured, `--count` and `--duration` stop it, and Ctrl-C stops it cleanly and still writes the report. At the end the report shows how many packets the kernel dropped because the engine could not keep up.
+- Capturing needs privileges: run with `sudo`, on macOS install Wireshark's ChmodBPF to allow your user, on Linux run `sudo setcap cap_net_raw,cap_net_admin=eip ./build/dpi_engine_live`. Without them the engine says so.
+- Ethernet and loopback interfaces are supported (loopback frames are converted to Ethernet). Other link types are rejected with a message. The output file is always Ethernet.
+- `--libpcap-file <file>` reads a capture through the same libpcap code, which is how the tests cover live capture without root.
+- A long capture does not grow without bound: a flow silent for five minutes is forgotten.
+
+### Limits to know about
+
+- Flows are tracked per direction, so replies are separate flows and are not matched by rules that need the request (for example the server name).
+- Signatures are matched inside one packet. A pattern split across two TCP segments is not found (there is no TCP stream reassembly).
+- JA3 needs the whole ClientHello in one packet. QUIC and Encrypted Client Hello are not handled, and only IPv4 is processed.
+- Domain and category rules need a visible server name (SNI or HTTP Host).
+
+### Tests
+
+```bash
+make test
+```
+
+- `tests/unit_tests.cpp`: MD5 against the RFC 1321 vectors, Aho-Corasick, the rules-file parser, CIDR matching, categories, BitTorrent detection and the token bucket.
+- `tests/check_fp_distribution.sh`: every fast path gets traffic for several thread layouts.
+- `tests/check_features.sh`: runs the engine on `tests/features.pcap` and compares the report with counts computed independently by `tests/make_feature_pcap.py` (including its own JA3 and token-bucket models). It also covers case-insensitive app names, bad options, the libpcap path, loopback captures, BPF filters, `--count` and flow expiry.
+
+---
+
+## 13. Extending the Project
 
 ### Ideas for Improvement
 
@@ -1005,15 +1125,7 @@ python3 generate_test_pcap.py
        return AppType::TWITCH;
    ```
 
-2. **Add Bandwidth Throttling**
-   ```cpp
-   // Instead of DROP, delay packets
-   if (shouldThrottle(flow)) {
-       std::this_thread::sleep_for(10ms);
-   }
-   ```
-
-3. **Add Live Statistics Dashboard**
+2. **Add Live Statistics Dashboard**
    ```cpp
    // Separate thread printing stats every second
    void statsThread() {
@@ -1024,13 +1136,13 @@ python3 generate_test_pcap.py
    }
    ```
 
-4. **Add QUIC/HTTP3 Support**
+3. **Add QUIC/HTTP3 Support**
    - QUIC uses UDP on port 443
    - SNI is in the Initial packet (encrypted differently)
 
-5. **Add Persistent Rules**
-   - Save rules to file
-   - Load on startup
+4. **Add More Rule Kinds**
+   - Per-category and per-signature actions (log only, throttle, block)
+   - Reload signature files without a restart
 
 ---
 
