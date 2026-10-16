@@ -83,7 +83,11 @@ cl /EHsc /std:c++17 /O2 /I include /Fe:dpi_engine.exe ^
     src\pcap_reader.cpp ^
     src\packet_parser.cpp ^
     src\sni_extractor.cpp ^
-    src\types.cpp
+    src\types.cpp ^
+    src\content_filter.cpp ^
+    src\signature_engine.cpp ^
+    src\ja3.cpp ^
+    src\packet_source.cpp
 ```
 
 3. If successful, you'll see `dpi_engine.exe` in the folder
@@ -158,7 +162,11 @@ pacman -S mingw-w64-x86_64-gcc mingw-w64-x86_64-make
        src/pcap_reader.cpp ^
        src/packet_parser.cpp ^
        src/sni_extractor.cpp ^
-       src/types.cpp
+       src/types.cpp ^
+       src/content_filter.cpp ^
+       src/signature_engine.cpp ^
+       src/ja3.cpp ^
+       src/packet_source.cpp
    ```
 
 4. If successful, you'll see `dpi_engine.exe`
@@ -217,8 +225,14 @@ g++ -std=c++17 -pthread -O2 -I include -o dpi_engine \
     src/pcap_reader.cpp \
     src/packet_parser.cpp \
     src/sni_extractor.cpp \
-    src/types.cpp
+    src/types.cpp \
+    src/content_filter.cpp \
+    src/signature_engine.cpp \
+    src/ja3.cpp \
+    src/packet_source.cpp
 ```
+
+Or simply run `make` (see the main README).
 
 ### Step 5: Run
 
@@ -277,7 +291,11 @@ Follow **Option 2** above to install MinGW-w64, then continue here.
                 "src/pcap_reader.cpp",
                 "src/packet_parser.cpp",
                 "src/sni_extractor.cpp",
-                "src/types.cpp"
+                "src/types.cpp",
+                "src/content_filter.cpp",
+                "src/signature_engine.cpp",
+                "src/ja3.cpp",
+                "src/packet_source.cpp"
             ],
             "group": {
                 "kind": "build",

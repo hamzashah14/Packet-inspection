@@ -1,0 +1,5 @@
+# Extra domain lists for --categories. One category per line: <category>: <domain>, <domain>, ...
+# A domain matches itself and its sub-domains. Names that already exist (ads, social, streaming,
+# gaming, torrents) are extended, new names create new categories.
+ads:       adform.net, criteo.com
+work:      corp.example, intranet.example
