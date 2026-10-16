@@ -12,6 +12,12 @@ using PortableNet::netToHost32;
 #define ntohs(x) netToHost16(x)
 #define ntohl(x) netToHost32(x)
 
+namespace {
+// Packet bytes are not aligned, so read multi-byte fields with memcpy rather than a pointer cast.
+inline uint16_t load16(const uint8_t* p) { uint16_t v; std::memcpy(&v, p, sizeof v); return v; }
+inline uint32_t load32(const uint8_t* p) { uint32_t v; std::memcpy(&v, p, sizeof v); return v; }
+}  // namespace
+
 namespace PacketAnalyzer {
 
 bool PacketParser::parse(const RawPacket& raw, ParsedPacket& parsed) {
@@ -75,7 +81,7 @@ bool PacketParser::parseEthernet(const uint8_t* data, size_t len,
     parsed.src_mac = macToString(data + 6);
     
     // Parse EtherType (bytes 12-13, big-endian)
-    parsed.ether_type = ntohs(*reinterpret_cast<const uint16_t*>(data + 12));
+    parsed.ether_type = ntohs(load16(data + 12));
     
     offset = ETH_HEADER_LEN;
     return true;
@@ -138,16 +144,16 @@ bool PacketParser::parseTCP(const uint8_t* data, size_t len,
     const uint8_t* tcp_data = data + offset;
     
     // Source port (bytes 0-1)
-    parsed.src_port = ntohs(*reinterpret_cast<const uint16_t*>(tcp_data));
+    parsed.src_port = ntohs(load16(tcp_data));
     
     // Destination port (bytes 2-3)
-    parsed.dest_port = ntohs(*reinterpret_cast<const uint16_t*>(tcp_data + 2));
+    parsed.dest_port = ntohs(load16(tcp_data + 2));
     
     // Sequence number (bytes 4-7)
-    parsed.seq_number = ntohl(*reinterpret_cast<const uint32_t*>(tcp_data + 4));
+    parsed.seq_number = ntohl(load32(tcp_data + 4));
     
     // Acknowledgment number (bytes 8-11)
-    parsed.ack_number = ntohl(*reinterpret_cast<const uint32_t*>(tcp_data + 8));
+    parsed.ack_number = ntohl(load32(tcp_data + 8));
     
     // Data offset (upper 4 bits of byte 12) - header length in 32-bit words
     uint8_t data_offset = (tcp_data[12] >> 4) & 0x0F;
@@ -178,10 +184,10 @@ bool PacketParser::parseUDP(const uint8_t* data, size_t len,
     const uint8_t* udp_data = data + offset;
     
     // Source port (bytes 0-1)
-    parsed.src_port = ntohs(*reinterpret_cast<const uint16_t*>(udp_data));
+    parsed.src_port = ntohs(load16(udp_data));
     
     // Destination port (bytes 2-3)
-    parsed.dest_port = ntohs(*reinterpret_cast<const uint16_t*>(udp_data + 2));
+    parsed.dest_port = ntohs(load16(udp_data + 2));
     
     parsed.has_udp = true;
     offset += UDP_HEADER_LEN;
