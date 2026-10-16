@@ -4,8 +4,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
-g++ -std=c++17 -pthread -O2 -I include -o "$tmp/dpi_engine" \
-    src/dpi_mt.cpp src/pcap_reader.cpp src/packet_parser.cpp src/sni_extractor.cpp src/types.cpp
+make -s BUILD="$tmp" "$tmp/dpi_engine" >"$tmp/build.log" 2>&1 || { cat "$tmp/build.log"; exit 1; }
 
 for cfg in "--lbs 2 --fps 2" "--lbs 2 --fps 4" "--lbs 3 --fps 2"; do
   out=$("$tmp/dpi_engine" test_dpi.pcap "$tmp/out.pcap" --block-app YouTube --block-ip 192.168.1.50 $cfg)

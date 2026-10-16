@@ -79,6 +79,8 @@ enum class AppType {
     DISCORD,
     GITHUB,
     CLOUDFLARE,
+    // Peer-to-peer (detected from payload, not from the domain)
+    BITTORRENT,
     // Add more as needed
     APP_COUNT  // Keep this last for counting
 };

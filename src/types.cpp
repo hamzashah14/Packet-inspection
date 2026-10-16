@@ -52,6 +52,7 @@ std::string appTypeToString(AppType type) {
         case AppType::DISCORD:    return "Discord";
         case AppType::GITHUB:     return "GitHub";
         case AppType::CLOUDFLARE: return "Cloudflare";
+        case AppType::BITTORRENT: return "BitTorrent";
         default:                  return "Unknown";
     }
 }
